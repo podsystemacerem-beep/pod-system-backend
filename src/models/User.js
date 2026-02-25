@@ -27,6 +27,10 @@ const userSchema = new mongoose.Schema({
   },
   phone: String,
   area: String,
+  secretOrPrivateKey: {
+    type: String,
+    default: null,
+  },
   isActive: {
     type: Boolean,
     default: true,

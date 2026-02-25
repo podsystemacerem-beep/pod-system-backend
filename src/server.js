@@ -30,6 +30,15 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Upload directory
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+// Health check endpoint
+app.get('/api', (req, res) => {
+  res.json({ 
+    message: 'POD System Backend API',
+    status: 'running',
+    version: '1.0.0'
+  });
+});
+
 // Database connection
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
