@@ -53,58 +53,109 @@ router.post('/dsr', authMiddleware, roleMiddleware(['coordinator', 'admin']), as
       });
     }
 
-    // Compute simple CPM-like estimates from historical timestamps where available
-    const assignmentDurations = []; // bill.createdAt -> delivery.createdAt
-    const deliveryExecutionDurations = []; // delivery.createdAt -> delivery.deliveryDate
-    const proofCaptureDurations = []; // delivery.deliveryDate -> first proof.timestamp
-    const verificationDurations = []; // delivery.deliveryDate -> verifiedAt
-
+    // CPM Calculation: Duration per Activity
+    // Activity A: Route Assignment - from first bill assigned to last bill assigned
+    let assignmentStartTime = null;
+    let assignmentEndTime = null;
+    
     deliveries.forEach(d => {
-      try {
-        if (d.billId && d.billId.createdAt && d.createdAt) {
-          assignmentDurations.push(d.createdAt - d.billId.createdAt);
+      if (d.billId && d.billId.createdAt) {
+        const assignTime = new Date(d.billId.createdAt);
+        if (!assignmentStartTime || assignTime < assignmentStartTime) {
+          assignmentStartTime = assignTime;
         }
-        if (d.createdAt && d.deliveryDate) {
-          deliveryExecutionDurations.push(d.deliveryDate - d.createdAt);
+        if (!assignmentEndTime || assignTime > assignmentEndTime) {
+          assignmentEndTime = assignTime;
         }
-        if (d.deliveryDate && d.proofImages && d.proofImages.length) {
-          const firstProof = d.proofImages[0];
-          if (firstProof.timestamp) proofCaptureDurations.push(new Date(firstProof.timestamp) - d.deliveryDate);
-        }
-        if (d.deliveryDate && d.verifiedAt) {
-          verificationDurations.push(new Date(d.verifiedAt) - d.deliveryDate);
-        }
-      } catch (e) {
-        // ignore malformed timestamps
       }
     });
 
-    const avg = arr => (arr && arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null);
+    const assignmentDurationMs = (assignmentStartTime && assignmentEndTime) 
+      ? assignmentEndTime - assignmentStartTime 
+      : 60 * 60 * 1000; // Default 60 mins
+    const assignmentDurationMins = Math.round(assignmentDurationMs / 60000);
 
-    const defaults = {
-      assignment: 30 * 60 * 1000,
-      deliveryExecution: 480 * 60 * 1000,
-      proofCapture: 120 * 60 * 1000,
-      verification: 60 * 60 * 1000,
-      reporting: 30 * 60 * 1000,
-    };
+    // Activity B: Delivery Execution - from first delivery to last delivery
+    let deliveryStartTime = null;
+    let deliveryEndTime = null;
+    
+    deliveries.forEach(d => {
+      if (d.deliveryDate) {
+        const delivTime = new Date(d.deliveryDate);
+        if (!deliveryStartTime || delivTime < deliveryStartTime) {
+          deliveryStartTime = delivTime;
+        }
+        if (!deliveryEndTime || delivTime > deliveryEndTime) {
+          deliveryEndTime = delivTime;
+        }
+      }
+    });
 
-    const assignmentMs = avg(assignmentDurations) || defaults.assignment;
-    const deliveryExecMs = avg(deliveryExecutionDurations) || defaults.deliveryExecution;
-    const proofCaptureMs = avg(proofCaptureDurations) || defaults.proofCapture;
-    const verificationMs = avg(verificationDurations) || defaults.verification;
-    const reportingMs = defaults.reporting;
+    const deliveryExecutionMs = (deliveryStartTime && deliveryEndTime)
+      ? deliveryEndTime - deliveryStartTime
+      : 480 * 60 * 1000; // Default 480 mins
+    const deliveryExecutionMins = Math.round(deliveryExecutionMs / 60000);
 
-    const stages = [
-      { stage: 'Route Assignment', duration: Math.round(assignmentMs / 60000), dependency: 'Start' },
-      { stage: 'Delivery Execution', duration: Math.round(deliveryExecMs / 60000), dependency: 'Route Assignment' },
-      { stage: 'Proof Capture', duration: Math.round(proofCaptureMs / 60000), dependency: 'Delivery Execution' },
-      { stage: 'Proof Verification', duration: Math.round(verificationMs / 60000), dependency: 'Proof Capture' },
-      { stage: 'Reporting', duration: Math.round(reportingMs / 60000), dependency: 'Proof Verification' },
+    // Activity C: Reporting - from end of delivery execution to report generation
+    const reportGenerationTime = new Date();
+    const reportingDurationMs = 5 * 60 * 1000; // Default 5 mins
+    const reportingDurationMins = Math.round(reportingDurationMs / 60000);
+
+    // CPM Forward Pass: Calculate ES (Earliest Start) and EF (Earliest Finish)
+    const activities = [
+      { id: 'A', name: 'Route Assignment', duration: assignmentDurationMins, predecessor: null },
+      { id: 'B', name: 'Delivery Execution', duration: deliveryExecutionMins, predecessor: 'A' },
+      { id: 'C', name: 'Reporting', duration: reportingDurationMins, predecessor: 'B' },
     ];
 
-    const totalMs = assignmentMs + deliveryExecMs + proofCaptureMs + verificationMs + reportingMs;
-    const estimatedCompletion = new Date(Date.now() + totalMs);
+    // Forward Pass
+    activities.forEach((activity, index) => {
+      if (activity.predecessor === null) {
+        activity.ES = 0;
+      } else {
+        const predActivity = activities.find(a => a.id === activity.predecessor);
+        activity.ES = predActivity.EF;
+      }
+      activity.EF = activity.ES + activity.duration;
+    });
+
+    // Backward Pass: Calculate LS (Latest Start) and LF (Latest Finish)
+    const projectDuration = activities[activities.length - 1].EF;
+    
+    for (let i = activities.length - 1; i >= 0; i--) {
+      const activity = activities[i];
+      if (i === activities.length - 1) {
+        activity.LF = activity.EF;
+      } else {
+        const successorId = activities.find(a => a.predecessor === activity.id)?.id;
+        const successor = activities.find(a => a.id === successorId);
+        activity.LF = successor.LS;
+      }
+      activity.LS = activity.LF - activity.duration;
+    }
+
+    // Calculate Slack and identify Critical Path
+    activities.forEach(activity => {
+      activity.slack = activity.LS - activity.ES;
+      activity.isCritical = activity.slack === 0;
+    });
+
+    const criticalPathActivities = activities.filter(a => a.isCritical);
+
+    const stages = activities.map(a => ({
+      activity: a.id,
+      stage: a.name,
+      duration: a.duration,
+      ES: a.ES,
+      EF: a.EF,
+      LS: a.LS,
+      LF: a.LF,
+      slack: a.slack,
+      isCritical: a.isCritical,
+      predecessor: a.predecessor || 'Start',
+    }));
+
+    const estimatedCompletion = new Date(Date.now() + projectDuration * 60000);
 
     const report = new Report({
       reportDate: new Date(),
@@ -120,7 +171,9 @@ router.post('/dsr', authMiddleware, roleMiddleware(['coordinator', 'admin']), as
         messengerPerformance,
       },
       criticalPath: {
+        projectDuration: projectDuration,
         stages,
+        criticalPath: criticalPathActivities.map(a => a.id).join(' -> '),
         estimatedCompletion,
       },
     });
