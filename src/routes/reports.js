@@ -96,20 +96,41 @@ router.post('/dsr', authMiddleware, roleMiddleware(['coordinator', 'admin']), as
       : 480 * 60 * 1000; // Default 480 mins
     const deliveryExecutionMins = Math.round(deliveryExecutionMs / 60000);
 
-    // Activity C: Reporting - from end of delivery execution to report generation
-    const reportGenerationTime = new Date();
-    const reportingDurationMs = 5 * 60 * 1000; // Default 5 mins
-    const reportingDurationMins = Math.round(reportingDurationMs / 60000);
+    // Activity C: Proof Verification - from first verified bill to last verified bill
+    let verificationStartTime = null;
+    let verificationEndTime = null;
+    
+    deliveries.forEach(d => {
+      if (d.verifiedAt) {
+        const verifyTime = new Date(d.verifiedAt);
+        if (!verificationStartTime || verifyTime < verificationStartTime) {
+          verificationStartTime = verifyTime;
+        }
+        if (!verificationEndTime || verifyTime > verificationEndTime) {
+          verificationEndTime = verifyTime;
+        }
+      }
+    });
+
+    const proofVerificationMs = (verificationStartTime && verificationEndTime)
+      ? verificationEndTime - verificationStartTime
+      : 60 * 60 * 1000; // Default 60 mins
+    const proofVerificationMins = Math.round(proofVerificationMs / 60000);
+
+    // Activity D: Reporting - from end of verification to report generation
+    const reportingDurationMins = 30;
 
     // CPM Forward Pass: Calculate ES (Earliest Start) and EF (Earliest Finish)
+    // Linear Path: A -> B -> C -> D
     const activities = [
       { id: 'A', name: 'Route Assignment', duration: assignmentDurationMins, predecessor: null },
       { id: 'B', name: 'Delivery Execution', duration: deliveryExecutionMins, predecessor: 'A' },
-      { id: 'C', name: 'Reporting', duration: reportingDurationMins, predecessor: 'B' },
+      { id: 'C', name: 'Proof Verification', duration: proofVerificationMins, predecessor: 'B' },
+      { id: 'D', name: 'Reporting', duration: reportingDurationMins, predecessor: 'C' },
     ];
 
-    // Forward Pass
-    activities.forEach((activity, index) => {
+    // Forward Pass: Calculate ES (Earliest Start) and EF (Earliest Finish)
+    activities.forEach((activity) => {
       if (activity.predecessor === null) {
         activity.ES = 0;
       } else {
